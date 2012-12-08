@@ -1,0 +1,97 @@
+#!/bin/bash
+
+
+
+MODES=()
+MODE=$(git config --get version-check-hook.mode)
+raw_config_str=$(git config --get-regex version-check-hook\.)
+DEFAULT_IFS=$IFS
+IFS=$'\n'
+config_str=(${raw_config_str//version-check-hook./})
+
+for line in ${config_str[*]} ; do
+    name=${line%%[- ]*}
+    if [ $name != "mode" ] ; then
+        # for loopで重複確認（配列を関数に渡すのは大変）
+        is_contain=false
+        for mode in ${MODES[*]} ; do
+            if [ $mode = $name ] ; then is_contain=true ; break ; fi
+        done
+        if ! $is_contain ; then
+            MODES+=($name)
+        fi
+    fi
+done
+
+# branch nameを取得
+BRANCH_NAME=""
+BRANCH_NAMES=($(git branch --contains HEAD 2>/dev/null)) || exit 0; #ブランチ名が取れなかった
+for bname in ${BRANCH_NAMES[*]} ; do
+    if [[ $bname =~ ^\*[\ ] ]] ; then
+        BRANCH_NAME=${bname:2}
+        break
+    fi
+done
+
+VERSION_TAG=$(git config --get gitflow.prefix.versiontag)
+PREFIX_RELEASE=$(git config --get gitflow.prefix.release)
+PREFIX_HOTFIX=$(git config --get gitflow.prefix.hotfix)
+
+# get the version
+case $BRANCH_NAME in
+    ${PREFIX_RELEASE}* )
+        VERSION=$(expr "${BRANCH_NAME:${#PREFIX_RELEASE}}" : "[^0-9]*\([0-9.]*[ab]\{0,1\}\)$" ) ;;
+    ${PREFIX_HOTFIX}* )
+        VERSION=$(expr "${BRANCH_NAME:${#PREFIX_HOTFIX}}" : "[^0-9]*\([0-9.]*[ab]\{0,1\}\)$" ) ;;
+    *)
+        exit 0  # versionチェックすべきコミットではない
+esac
+
+if [ -z $VERSION ] ; then exit 0 ; fi
+
+for mode in ${MODES[*]} ; do
+    if [ $MODE = $mode -o $MODE = "all" ] ; then
+        pattern=""
+        path=""
+        for line in ${config_str[*]} ; do
+            name=${line%%-*}
+            rest=${line#*-}
+            if [ $name = $mode ] ; then
+                key=${rest%% *}
+                value=${rest#* }
+                if [ $key = "path" ] ; then path=$value
+                elif [ $key = "pattern" ] ; then pattern=$value
+                fi
+            fi
+        done
+        # pathを調べて正規表現でチェック
+        if [ -z $(git ls-files $path) ] ; then continue ; fi
+        raw_match_line=($(git grep -n --full-name "$pattern" $path))
+        match_line=${raw_match_line#*:*:}
+        if [ ${#match_line[*]} -gt 1 ] ; then
+            echo "[version-check-hook] Found multiple mutch lines."
+            echo "Abort."
+            exit 1
+        elif [ ${#match_line[*]} -eq 0 ] ; then
+            echo "[version-check-hook] Couldn't find a mutch line."
+            echo "Abort."
+            exit 1
+        else
+            match_version=$(expr "${match_line}" : "$pattern")
+            if [ -z $match_version ] ; then
+                echo "[version-check-hook] Failed to extract version string in [$path]: $pattern"
+                exit 1
+            fi
+            if [ $VERSION != $match_version ] ; then
+                echo "[version-check-hook] Incompatible version found."
+                echo "Your branch: ${VERSION}"
+                echo "Matched version: ${match_version}"
+                echo "----"
+                echo $raw_match_line
+                exit 1
+            fi
+        fi
+    fi
+done
+
+exit 0
